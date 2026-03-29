@@ -1,3 +1,13 @@
+---
+title: openenv-round1-ticket-triage
+emoji: "🧠"
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+app_port: 8000
+---
+
 # Ticket Triage OpenEnv (Round 1)
 
 A real-world OpenEnv environment where an agent triages customer support incidents by choosing:
