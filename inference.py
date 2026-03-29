@@ -75,10 +75,24 @@ def llm_json_plan(ticket: dict[str, Any]) -> dict[str, Any]:
     if HF_TOKEN and API_BASE_URL:
         client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
         prompt = (
-            "You are a support triage assistant. Given a ticket, output strict JSON with keys: "
-            "priority (low|medium|high|critical), team (billing|support|platform|security), "
-            "eta_hours (positive integer), tags (string array).\n"
-            f"Ticket: {json.dumps(ticket)}"
+            "You are an expert support ticket classifier. Analyze this ticket carefully.\n\n"
+            f"Ticket ID: {ticket.get('ticket_id', 'unknown')}\n"
+            f"Title: {ticket.get('title', '')}\n"
+            f"Description: {ticket.get('description', '')}\n"
+            f"Customer Tier: {ticket.get('customer_tier', 'free')}\n\n"
+            "Classification rules:\n"
+            "- CRITICAL priority: security breaches, data leaks, system down, prod outages (ETA: 1-2h)\n"
+            "- HIGH priority: payment failures, billing issues, premium customer problems (ETA: 2-8h)\n"
+            "- MEDIUM priority: feature requests, account issues, non-urgent bugs (ETA: 24-48h)\n"
+            "- LOW priority: questions, documentation, low-impact issues (ETA: 72h+)\n\n"
+            "Team assignment:\n"
+            "- security: auth, tokens, suspicious activity, data breaches, privacy\n"
+            "- billing: payments, invoices, subscriptions, refunds, charges\n"
+            "- infra: server errors, API issues, performance, deployments\n"
+            "- support: general questions, account help, features, onboarding\n\n"
+            "Tags should be specific (e.g., 'payment-failed', 'prod', 'privacy', 'api', 'customer-impact').\n"
+            "Premium/enterprise customers get higher priority and shorter ETA.\n\n"
+            "Return ONLY valid JSON with keys: priority, team, eta_hours, tags (array of strings)."
         )
         completion = client.chat.completions.create(
             model=MODEL_NAME,
@@ -97,27 +111,45 @@ def llm_json_plan(ticket: dict[str, Any]) -> dict[str, Any]:
 
     title = ticket.get("title", "").lower()
     desc = ticket.get("description", "").lower()
+    tier = ticket.get("customer_tier", "free").lower()
     text = f"{title} {desc}"
 
-    if "token" in text or "security" in text or "suspicious" in text:
+    # Premium/enterprise customers get priority boost
+    is_premium = tier in ("premium", "enterprise")
+
+    if (
+        "token" in text
+        or "security" in text
+        or "suspicious" in text
+        or "breach" in text
+    ):
         return {
             "priority": "critical",
             "team": "security",
             "eta_hours": 1,
             "tags": ["security", "incident", "prod", "privacy"],
         }
-    if "charge" in text or "invoice" in text or "payment" in text:
+    if "charge" in text or "invoice" in text or "payment" in text or "billing" in text:
         return {
-            "priority": "high",
+            "priority": "high" if is_premium else "medium",
             "team": "billing",
-            "eta_hours": 4,
-            "tags": ["payment", "premium", "customer-impact"],
+            "eta_hours": 2 if is_premium else 4,
+            "tags": ["payment", "customer-impact"]
+            + (["premium"] if is_premium else []),
+        }
+    if "api" in text or "500" in text or "error" in text or "down" in text:
+        return {
+            "priority": "high" if is_premium else "medium",
+            "team": "infra",
+            "eta_hours": 4 if is_premium else 12,
+            "tags": ["api", "prod", "customer-impact"]
+            + (["premium"] if is_premium else []),
         }
     return {
-        "priority": "medium",
+        "priority": "medium" if is_premium else "low",
         "team": "support",
-        "eta_hours": 24,
-        "tags": ["account", "customer-impact"],
+        "eta_hours": 12 if is_premium else 24,
+        "tags": ["account", "customer-impact"] + (["premium"] if is_premium else []),
     }
 
 
@@ -136,13 +168,15 @@ def run_one_task(client: httpx.Client, task_id: str) -> BaselineResult:
     )
 
     reward_trace: list[float] = []
-    actions = [
-        {"action_type": "set_priority", "value": plan["priority"]},
-        {"action_type": "set_team", "value": plan["team"]},
-        {"action_type": "set_eta", "value": str(plan["eta_hours"])},
-    ] + [{"action_type": "add_tag", "value": tag} for tag in plan["tags"]] + [
-        {"action_type": "submit", "value": None}
-    ]
+    actions = (
+        [
+            {"action_type": "set_priority", "value": plan["priority"]},
+            {"action_type": "set_team", "value": plan["team"]},
+            {"action_type": "set_eta", "value": str(plan["eta_hours"])},
+        ]
+        + [{"action_type": "add_tag", "value": tag} for tag in plan["tags"]]
+        + [{"action_type": "submit", "value": None}]
+    )
 
     done = False
     for action in actions:
